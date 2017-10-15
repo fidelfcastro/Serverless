@@ -5,6 +5,8 @@ var async = require("async");
 var AWS = require("aws-sdk");
 var lambda = new AWS.Lambda({"region": "us-east-1"});
 var http = require("http");
+var s3 = new AWS.S3();
+
 require("string_format");
 
 var PUBLIC_KEY = "5ce9976ff5ac7877afe569406e97b2d4";
@@ -20,6 +22,11 @@ module.exports.get = (event, context, callback) => {
     var secondCharacterGetSeriesUrl = getSeriesTemplateUrl.format(event.secondCharacterId, ts, PUBLIC_KEY, HASH);
     console.log(firstCharacterGetSeriesUrl);
     console.log(secondCharacterGetSeriesUrl);
+
+    var idArray = [event.firstCharacterId, event.secondCharacterId];
+    idArray.sort();
+    var charactersIds = idArray[0]+"_"+idArray[1];
+    var key = charactersIds+"series";
 
     async.parallel([
         function(callback){
@@ -40,9 +47,46 @@ module.exports.get = (event, context, callback) => {
 
         }
     ], function(error,data){
-            var response = filterSeries(data[0], data[1]);
-            callback(null, response);
-            console.log(response);
+        var response = filterSeries(data[0], data[1]);
+        var jsonFile = JSON.stringify(response);
+
+
+        var getParams = {
+            Bucket: 'fidel-assignment7-bucket',
+            Key: key
+        };
+        var putParams = {
+            Bucket: 'fidel-assignment7-bucket',
+            Key: key,
+            ACL: "public-read",
+            Body: jsonFile
+
+        };
+        s3.headObject(getParams, function (error, data) {
+            if (error) {
+                s3.putObject(putParams, function (err, data) {
+                    if (err) {
+                        console.log("Put params error " + err);
+                    }
+                    else {
+                        console.log("API MARVEL");
+                        callback(null,response);
+
+                    }
+                });
+            }
+            else if(data){
+                s3.getObject(getParams,function (error,data) {
+                    var fileData = data.Body.toString('utf-8');
+                    var file = JSON.parse(fileData);
+                    callback(null,file);
+                    console.log("BUCKET");
+
+                })
+            }
+
+
+        })
     });
 };
 
