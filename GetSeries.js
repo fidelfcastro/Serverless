@@ -6,6 +6,8 @@ var AWS = require("aws-sdk");
 var lambda = new AWS.Lambda({"region": "us-east-1"});
 var http = require("http");
 var s3 = new AWS.S3();
+var dynamodb = new AWS.DynamoDB({'region': 'us-east-1'});
+var cloudwatchlogs = new AWS.CloudWatchLogs({'region': 'us-east-1'});
 
 require("string_format");
 
@@ -15,83 +17,150 @@ var ts = new Date().getTime();
 var HASH = CryptoJS.MD5(ts + PRIV_KEY + PUBLIC_KEY).toString();
 
 var getSeriesTemplateUrl = "http://gateway.marvel.com/v1/public/characters/{0}/series?limit=1&ts={1}&apikey={2}&hash={3}"
+var startTime, endTime, character1, character2, key, memorySize, memoryUsed, requestId, logName, singleQuantity = "";
+var singleQty = 0;
 
 
 module.exports.get = (event, context, callback) => {
-    var firstCharacterGetSeriesUrl = getSeriesTemplateUrl.format(event.firstCharacterId, ts, PUBLIC_KEY, HASH);
-    var secondCharacterGetSeriesUrl = getSeriesTemplateUrl.format(event.secondCharacterId, ts, PUBLIC_KEY, HASH);
-    console.log(firstCharacterGetSeriesUrl);
-    console.log(secondCharacterGetSeriesUrl);
+
+    startTime = new Date().toUTCString();
+    character1 = event.firstCharacterId.toString();
+    character2 = event.secondCharacterId.toString();
+    console.log("START TIME: " + startTime);
+
 
     var idArray = [event.firstCharacterId, event.secondCharacterId];
     idArray.sort();
     var charactersIds = idArray[0]+"_"+idArray[1];
     var key = charactersIds+"series";
 
-    async.parallel([
-        function(callback){
-            async.waterfall([
-                    async.apply(getCharacterDataSimple, firstCharacterGetSeriesUrl),
-                    async.apply(invokeLambdas, event.firstCharacterId)
+    var getParams = {
+        Bucket: 'fidel-assignment7-bucket',
+        Key: key
+    };
 
-                ]
-                ,callback)
+    var dynamoParams = {
+        TableName: 'Fidel-MarvelTableA8'
+    }
+    s3.headObject(getParams, function (error, data) {
+        if (error) {
+            var firstCharacterGetSeriesUrl = getSeriesTemplateUrl.format(event.firstCharacterId, ts, PUBLIC_KEY, HASH);
+            var secondCharacterGetSeriesUrl = getSeriesTemplateUrl.format(event.secondCharacterId, ts, PUBLIC_KEY, HASH);
+            console.log(firstCharacterGetSeriesUrl);
+            console.log(secondCharacterGetSeriesUrl);
 
-        },
-        function(callback){
-            async.waterfall([
-                    async.apply(getCharacterDataSimple, secondCharacterGetSeriesUrl),
-                    async.apply(invokeLambdas, event.secondCharacterId)
-                ]
-                ,callback)
+            async.parallel([
+                function(callback){
+                    async.waterfall([
+                            async.apply(getCharacterDataSimple, firstCharacterGetSeriesUrl),
+                            async.apply(invokeLambdas, event.firstCharacterId)
 
-        }
-    ], function(error,data){
-        var response = filterSeries(data[0], data[1]);
-        var jsonFile = JSON.stringify(response);
+                        ]
+                        ,callback)
 
+                },
+                function(callback){
+                    async.waterfall([
+                            async.apply(getCharacterDataSimple, secondCharacterGetSeriesUrl),
+                            async.apply(invokeLambdas, event.secondCharacterId)
+                        ]
+                        ,callback)
 
-        var getParams = {
-            Bucket: 'fidel-assignment7-bucket',
-            Key: key
-        };
-        var putParams = {
-            Bucket: 'fidel-assignment7-bucket',
-            Key: key,
-            ACL: "public-read",
-            Body: jsonFile
+                }
+            ], function(error,data) {
+                var response = filterSeries(data[0], data[1]);
+                var jsonFile = JSON.stringify(response);
+                callback(null, response);
+                var putParams = {
+                    Bucket: 'fidel-assignment7-bucket',
+                    Key: key,
+                    ACL: "public-read",
+                    Body: jsonFile
 
-        };
-        s3.headObject(getParams, function (error, data) {
-            if (error) {
+                };
                 s3.putObject(putParams, function (err, data) {
                     if (err) {
                         console.log("Put params error " + err);
                     }
                     else {
                         console.log("API MARVEL");
-                        callback(null,response);
+
 
                     }
                 });
+            });
+        }
+        else {
+            s3.getObject(getParams,function (error,data) {
+
+                var fileData = data.Body.toString('utf-8');
+                var file = JSON.parse(fileData);
+                console.log("BUCKET");
+                callback(null,file);
+            })
+        }
+    })
+    requestId = context.awsRequestId;
+    log(requestId);
+}
+
+var log = function logEvents(id){
+    endTime = new Date().toUTCString();
+    singleQuantity = singleQty.toString();
+    var requestId = id;
+    var logParams = {
+        logGroupName:"/aws/lambda/fidel-serverless-dev-GetSeries",
+        filterPattern: 'REPORT',
+        interleaved: true
+    }
+
+    cloudwatchlogs.filterLogEvents(logParams,function(error, data) {
+        if(error){
+            console.log('Console Watch Error: ' + error);
+        }
+        else{
+            var logList=[]
+            var log=data.events
+            log.forEach(function(object){
+                var req = object.message.match(/RequestId: (.*)\tDuration/)[1];
+                //if(req.isEqual(requestId)){
+                logList.push(object.message.match(/Memory Size: (.*)\tMax/)[1]);
+                logList.push(object.message.match(/Memory Used: (.*)\t/)[1]);
+                //}
+
+            })
+            memorySize = logList[0];
+            memoryUsed = logList[1];
+
+        }
+        dynamodb.putItem({
+            "TableName": "Fidel-MarvelTableA8",
+            "Item": {
+                "id": {"S": requestId},
+                "StartTime": {"S": startTime},
+                "EndTime": {"S": endTime},
+                "SingleQuantity": {"S": singleQuantity},
+                "Character1": {"S": character1},
+                "Character2": {"S": character2},
+                "MemoryReserved": {"S": memorySize},
+                "MemoryUsed": {"S": memoryUsed}
             }
-            else if(data){
-                s3.getObject(getParams,function (error,data) {
-                    var fileData = data.Body.toString('utf-8');
-                    var file = JSON.parse(fileData);
-                    callback(null,file);
-                    console.log("BUCKET");
-
-                })
+        }, function (err, data) {
+            if (err) {
+                console.log('Error putting item into dynamodb failed: ' + err);
             }
+            else {
+                console.log('DYNAMO SUCCESS');
+            }
+        });
 
-
-        })
-    });
-};
+    })
+}
 
 var getCharacterDataSimple = function(getUrl, callback){
     var seriesTotal;
+
+
 
     http.get(getUrl, (res) => {
         res.setEncoding('utf8');
@@ -116,6 +185,8 @@ var getCharacterDataSimple = function(getUrl, callback){
 
 var invokeLambdas = function(characterId, seriesCount, callback){
     var lambdaCount = Math.ceil(seriesCount / 100);
+    singleQty = lambdaCount+singleQty;
+
     var tasks = [];
     var series =[];
     for(var i = 0; i < lambdaCount ; i++){
